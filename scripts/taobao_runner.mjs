@@ -44,26 +44,14 @@ function printJson(status, extra = {}) {
   );
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function buildCanonicalItemUrl(productId, fallbackUrl = "") {
-  const id = String(productId || "").trim();
-
-  if (/^\d{8,}$/.test(id)) {
-    return `https://item.taobao.com/item.htm?id=${id}`;
-  }
-
-  return fallbackUrl;
-}
-
 function normalizeText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
 function parseGoodRate(text) {
   if (!text) return null;
+
+  const t = normalizeText(text);
 
   const patterns = [
     /好评率[:：\s]*([0-9]+(?:\.[0-9]+)?)\s*%/i,
@@ -73,52 +61,16 @@ function parseGoodRate(text) {
   ];
 
   for (const pattern of patterns) {
-    const match = text.match(pattern);
+    const match = t.match(pattern);
     if (match) return Number(match[1]);
   }
 
   return null;
 }
-function getKeywordCore(keyword) {
-  const raw = String(keyword || "").trim();
 
-  const cleaned = raw
-    .replace(/\s+/g, "")
-    .replace(/淘宝|天猫|京东|正品|官方|旗舰|旗舰店|包邮|新款|推荐/g, "")
-    .replace(/有线|无线|蓝牙|智能|专业|学生|成人|男女|男士|女士/g, "");
-
-  if (cleaned.length >= 2) return cleaned;
-
-  return raw;
-}
-
-function isKeywordRelatedText(text, keyword, keywordCore) {
-  const t = normalizeText(text);
-  const k = String(keyword || "").trim();
-  const c = String(keywordCore || "").trim();
-
-  if (!k && !c) return true;
-
-  if (k && t.includes(k)) return true;
-
-  if (c && c.length >= 2 && t.includes(c)) return true;
-
-  return false;
-}
-
-function getProductIdFromUrl(url) {
-  try {
-    const u = new URL(url);
-    return (
-      u.searchParams.get("id") ||
-      u.searchParams.get("itemId") ||
-      u.searchParams.get("item_id") ||
-      url
-    );
-  } catch {
-    return url;
-  }
-}
+/**
+ * 保留你原先版本的人机验证识别逻辑。
+ */
 function isRiskOrVerifyText(text) {
   const t = normalizeText(text);
 
@@ -170,7 +122,7 @@ async function askEnter(message) {
 }
 
 /**
- * 人工接管函数：
+ * 保留你原先版本的人机验证人工接管函数。
  * 只要页面仍然是登录页、验证码页、滑块页、异常流量页，就一直等待人工处理。
  * 不会直接返回失败。
  */
@@ -231,21 +183,55 @@ async function closeExtraPages(context, keepPage) {
   }
 }
 
+async function launchContext() {
+  try {
+    return await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      channel: "chrome",
+      viewport: {
+        width: 1400,
+        height: 900
+      },
+      args: [
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled"
+      ]
+    });
+  } catch {
+    return await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      viewport: {
+        width: 1400,
+        height: 900
+      },
+      args: [
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled"
+      ]
+    });
+  }
+}
+
 async function openTaobaoHome(page) {
   await page.goto("https://www.taobao.com", {
     waitUntil: "domcontentloaded",
     timeout: 60000
   });
 
+  await page.waitForTimeout(3000);
   await waitUntilPageUsable(page, "home");
 }
 
-async function searchKeyword(page, keyword) {
-  await waitUntilPageUsable(page, "before_search");
-
+/**
+ * 直接打开淘宝搜索结果页。
+ * 不再依赖首页搜索框，避免搜索没有真正跳转。
+ */
+async function openSearchPage(page) {
   const searchUrl = `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}`;
 
-  console.log(`\n直接打开淘宝搜索结果页：${searchUrl}`);
+  console.log(`\n打开淘宝综合搜索页：${searchUrl}`);
 
   await page.goto(searchUrl, {
     waitUntil: "domcontentloaded",
@@ -253,511 +239,260 @@ async function searchKeyword(page, keyword) {
   });
 
   await page.waitForTimeout(5000);
+  await waitUntilPageUsable(page, "search_page");
 
-  await waitUntilPageUsable(page, "search_result");
-
-  const currentUrl = page.url();
-  console.log("搜索后当前页面：", currentUrl);
-
-  /**
-   * 如果仍然停留在 www.taobao.com，说明淘宝没有进入搜索结果页。
-   */
-  if (currentUrl.includes("www.taobao.com") && !currentUrl.includes("s.taobao.com")) {
-    console.log("当前仍在淘宝首页，尝试使用页面搜索框兜底搜索。");
-
-    const inputCandidates = [
-      'input[name="q"]',
-      'input[placeholder*="搜索"]',
-      'input[aria-label*="搜索"]',
-      'input[type="search"]'
-    ];
-
-    let searched = false;
-
-    for (const selector of inputCandidates) {
-      const input = page.locator(selector).first();
-
-      if (await input.isVisible().catch(() => false)) {
-        await input.click();
-        await input.fill(keyword);
-        await page.keyboard.press("Enter");
-
-        searched = true;
-        break;
-      }
-    }
-
-    if (!searched) {
-      console.log("没有找到可用搜索框。");
-      return;
-    }
-
-    await page.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
-    await page.waitForTimeout(5000);
-
-    await waitUntilPageUsable(page, "search_result_after_fallback");
-
-    console.log("兜底搜索后当前页面：", page.url());
-  }
-
-  /**
-   * 等待搜索结果卡片出现。
-   * 当前淘宝搜索结果常见卡片：
-   * a[id^="item_id_"]
-   * a[class*="CardV2--doubleCardWrapper"]
-   */
-  const resultCardSelector = [
-    'a[id^="item_id_"]',
-    'a[class*="CardV2--doubleCardWrapper"]',
-    'a[href*="click.simba.taobao.com"]',
-    'a[href*="item.taobao.com"]',
-    'a[href*="detail.tmall.com"]'
-  ].join(",");
-
-  try {
-    await page.locator(resultCardSelector).first().waitFor({
-      state: "visible",
-      timeout: 20000
-    });
-
-    console.log("已检测到淘宝搜索结果商品卡片。");
-  } catch {
-    const text = await getBodyText(page);
-    console.log("没有等到商品卡片，当前页面文本前 500 字：");
-    console.log(text.slice(0, 500));
-  }
+  console.log("搜索页当前 URL：", page.url());
 }
 
-async function collectProductLinks(page, keyword) {
-  // collectProductLinks_LOCATOR_V3
-  await waitUntilPageUsable(page, "collect_links");
-
-  const keywordCore = getKeywordCore(keyword);
-  const searchShot = await screenshot(page, "search_result");
-  if (page.url().includes("www.taobao.com") && !page.url().includes("s.taobao.com")) {
-  console.log("警告：当前仍在淘宝首页，不是搜索结果页。将直接跳转到搜索页。");
-
-  await page.goto(`https://s.taobao.com/search?q=${encodeURIComponent(keyword)}`, {
-    waitUntil: "domcontentloaded",
-    timeout: 60000
-  });
-
-  await page.waitForTimeout(5000);
-  await waitUntilPageUsable(page, "collect_links_redirect_search");
-}
-  await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
-  await page.waitForTimeout(3000);
-
-  function normalizeUrl(url) {
-    if (!url) return "";
-    if (url.startsWith("//")) return "https:" + url;
-    return url;
-  }
-
-  function getProductId(idAttr, href) {
-    if (idAttr && idAttr.startsWith("item_id_")) {
-      return idAttr.replace("item_id_", "");
-    }
-
-    try {
-      const u = new URL(href);
-      return (
-        u.searchParams.get("id") ||
-        u.searchParams.get("itemId") ||
-        u.searchParams.get("item_id") ||
-        u.searchParams.get("auctionId") ||
-        u.searchParams.get("ad_id") ||
-        href
-      );
-    } catch {
-      return href;
-    }
-  }
-
-  function isKeywordRelated(text) {
-    const t = normalizeText(text);
-    const k = normalizeText(keyword);
-    const c = normalizeText(keywordCore);
-
-    if (k && t.includes(k)) return true;
-    if (c && c.length >= 2 && t.includes(c)) return true;
-
-    return false;
-  }
-
-  function pickTitleFromText(text) {
-    const t = normalizeText(text);
-
-    const parts = t
-      .split(/(?=¥)|(?=￥)|(?=\d+万?\+?人付款)|(?=月销)|(?=官方旗舰店)|(?=旗舰店)|(?=店)/)
-      .map((x) => normalizeText(x))
-      .filter(Boolean);
-
-    const hit = parts.find((x) => isKeywordRelated(x) && x.length >= 3);
-
-    if (hit) return hit.slice(0, 180);
-
-    return t.slice(0, 180);
-  }
-
-  const cardSelector = [
-    'a[id^="item_id_"]',
-    'a[class*="CardV2--doubleCardWrapper"]',
-    'a[href*="click.simba.taobao.com"][id^="item_id_"]',
-    'a[href*="click.simba.taobao.com"][class*="CardV2"]'
-  ].join(",");
-
-  const cardLocator = page.locator(cardSelector);
-  const rawCount = await cardLocator.count().catch(() => 0);
-
-  console.log("\n搜索关键词：", keyword);
-  console.log("关键词核心词：", keywordCore);
-  console.log("淘宝搜索卡片 locator 数量：", rawCount);
-
-  const links = [];
-  const seen = new Set();
-
-  for (let i = 0; i < Math.min(rawCount, 100); i++) {
-    const card = cardLocator.nth(i);
-
-    try {
-      const hrefRaw = await card.getAttribute("href").catch(() => "");
-      const href = normalizeUrl(hrefRaw || "");
-
-      if (!href) continue;
-
-      const idAttr = await card.getAttribute("id").catch(() => "");
-      const productId = getProductId(idAttr, href);
-
-      if (seen.has(productId)) continue;
-
-      const cardText = normalizeText(
-        await card.innerText({ timeout: 3000 }).catch(() => "")
-      );
-
-      if (!cardText) continue;
-
-      let title = "";
-
-      title = normalizeText(
-        await card
-          .locator('[class*="Title--title"]')
-          .first()
-          .innerText({ timeout: 1000 })
-          .catch(() => "")
-      );
-
-      if (!title) {
-        title = normalizeText(
-          await card
-            .locator('[class*="Title--descWrapper"]')
-            .first()
-            .innerText({ timeout: 1000 })
-            .catch(() => "")
-        );
-      }
-
-      if (!title) {
-        title = pickTitleFromText(cardText);
-      }
-
-      let price = "";
-
-      const priceWrapperText = normalizeText(
-        await card
-          .locator('[class*="Price--priceWrapper"]')
-          .first()
-          .innerText({ timeout: 1000 })
-          .catch(() => "")
-      );
-
-      if (priceWrapperText) {
-        const m = priceWrapperText.match(/[¥￥]\s*\d+(?:\.\d+)?/);
-        if (m) price = m[0];
-      }
-
-      if (!price) {
-        const m = cardText.match(/[¥￥]\s*\d+(?:\.\d+)?/);
-        if (m) price = m[0];
-      }
-
-      const sales = normalizeText(
-        await card
-          .locator('[class*="Price--realSales"]')
-          .first()
-          .innerText({ timeout: 1000 })
-          .catch(() => "")
-      );
-
-      const shop = normalizeText(
-        await card
-          .locator('[class*="ShopInfo--shopNameText"]')
-          .first()
-          .innerText({ timeout: 1000 })
-          .catch(() => "")
-      );
-
-      const abstractText = normalizeText(
-        await card
-          .locator('[class*="Abstract"]')
-          .first()
-          .innerText({ timeout: 1000 })
-          .catch(() => "")
-      );
-
-      // 关键：按“有线耳机”或核心词“耳机”过滤
-      if (!isKeywordRelated(title) && !isKeywordRelated(cardText)) {
-        console.log(`跳过不相关卡片：${title || cardText.slice(0, 80)}`);
-        continue;
-      }
-
-      let score = 0;
-
-      if (normalizeText(title).includes(normalizeText(keyword))) score += 80;
-      if (normalizeText(title).includes(normalizeText(keywordCore))) score += 50;
-      if (cardText.includes(normalizeText(keyword))) score += 50;
-      if (cardText.includes(normalizeText(keywordCore))) score += 30;
-      if (price) score += 20;
-      if (sales) score += 10;
-      if (shop) score += 10;
-      if (abstractText.includes("好评")) score += 20;
-      if (href.includes("click.simba.taobao.com")) score += 5;
-
-      seen.add(productId);
-
-  const canonicalUrl = buildCanonicalItemUrl(productId, href);
-
-links.push({
-  title: title.slice(0, 180),
-  url: canonicalUrl,
-  source_url: href,
-  product_id: productId,
-  price,
-  sales,
-  shop,
-  abstract: abstractText,
-  card_text: cardText.slice(0, 800),
-  score
-});
-    } catch (err) {
-      console.log("解析单个商品卡片失败：", String(err.message || err).slice(0, 200));
-    }
-  }
-
-  links.sort((a, b) => b.score - a.score);
-
-  console.log("候选商品链接数量：", links.length);
-
-  links.slice(0, 10).forEach((x, i) => {
-    console.log(`${i + 1}. score=${x.score}`);
-    console.log(`   title=${x.title}`);
-    console.log(`   price=${x.price || ""}`);
-    console.log(`   sales=${x.sales || ""}`);
-    console.log(`   shop=${x.shop || ""}`);
-    console.log(`   abstract=${x.abstract || ""}`);
-    console.log(`   product_id=${x.product_id}`);
-    console.log(`   url=${x.url}`);
-  });
-
-  if (links.length === 0) {
-    const debugInfo = await page.evaluate(() => {
-      const cards = Array.from(
-        document.querySelectorAll(
-          'a[id^="item_id_"], a[class*="CardV2--doubleCardWrapper"], a[href*="click.simba.taobao.com"]'
-        )
-      ).slice(0, 20);
-
-      return {
-        title: document.title,
-        url: location.href,
-        bodyText: document.body.innerText.replace(/\s+/g, " ").trim().slice(0, 1500),
-        cardCount: cards.length,
-        cards: cards.map((a, i) => ({
-          i,
-          id: a.getAttribute("id"),
-          className: a.getAttribute("class"),
-          href: a.getAttribute("href"),
-          text: (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300)
-        }))
-      };
-    }).catch((err) => ({
-      error: String(err.message || err)
-    }));
-
-    console.log("\n========== 商品卡片调试信息 ==========");
-    console.log(JSON.stringify(debugInfo, null, 2));
-    console.log("=====================================\n");
-  }
-
-  return {
-    links,
-    searchShot,
-    keywordCore
-  };
-}
-async function parseProductDetail(context, item, index, keyword, keywordCore) {
-  const detail = await context.newPage();
-
-  try {
-    const targetUrl = buildCanonicalItemUrl(item.product_id, item.url);
-
-    console.log(`打开商品详情页：${targetUrl}`);
-
-    await detail.goto(targetUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000
-    });
-
-    await detail.waitForTimeout(4000);
-
-    await waitUntilPageUsable(detail, `detail_${index}`);
-
-    const text = await getBodyText(detail);
-    const goodRate = parseGoodRate(text);
-
-    let title = item.title;
-
-    try {
-      const possibleTitle = await detail
-        .locator("h1, [class*=title], [class*=Title]")
-        .first()
-        .innerText({ timeout: 5000 });
-
-      if (possibleTitle && possibleTitle.trim().length > 3) {
-        title = possibleTitle.trim();
-      }
-    } catch {
-      // 使用搜索结果页标题
-    }
-    const detailTextForCheck = `${title} ${text.slice(0, 1000)}`;
-
-if (!isKeywordRelatedText(detailTextForCheck, keyword, keywordCore)) {
-  return {
-    title: title.slice(0, 160),
-    price: "",
-    shop: "",
-    url: item.url,
-    good_rate: null,
-    rate_found: false,
-    keyword_mismatch: true,
-    mismatch_reason: `商品详情页内容与搜索关键词不匹配，keyword=${keyword}, core=${keywordCore}`
-  };
-}
-    let price = "";
-
-    const pricePatterns = [
-      /¥\s*([0-9]+(?:\.[0-9]+)?)/,
-      /￥\s*([0-9]+(?:\.[0-9]+)?)/,
-      /价格[:：\s]*([0-9]+(?:\.[0-9]+)?)/
-    ];
-
-    for (const pattern of pricePatterns) {
-      const match = text.match(pattern);
-      if (match) {
-        price = match[1];
-        break;
-      }
-    }
-
-    let shop = "";
-
-    const shopPatterns = [
-      /店铺[:：\s]*([^\s]{2,30})/,
-      /掌柜[:：\s]*([^\s]{2,30})/
-    ];
-
-    for (const pattern of shopPatterns) {
-      const match = text.match(pattern);
-      if (match) {
-        shop = match[1];
-        break;
-      }
-    }
-
-    return {
-      title: title.slice(0, 160),
-      price,
-      shop,
-      url: item.url,
-      good_rate: goodRate,
-      rate_found: goodRate !== null
-    };
-  } finally {
-    await detail.close().catch(() => {});
-  }
+/**
+ * 淘宝当前搜索结果卡片常见结构：
+ * <a id="item_id_xxx" class="CardV2--doubleCardWrapper--xxx" href="https://click.simba.taobao.com/...">
+ */
+function getSearchCardLocator(page) {
+  return page.locator(
+    [
+      'a[id^="item_id_"]',
+      'a[class*="CardV2--doubleCardWrapper"]',
+      'a[href*="click.simba.taobao.com"][id^="item_id_"]',
+      'a[href*="click.simba.taobao.com"][class*="CardV2"]',
+      'a[href*="item.taobao.com"]',
+      'a[href*="detail.tmall.com"]'
+    ].join(",")
+  );
 }
 
-async function chooseSkuIfPossible(page) {
-  const skuKeywords = /颜色|尺码|规格|套餐|版本|型号|款式|容量|分类/;
+async function waitSearchCards(page) {
+  const cardLocator = getSearchCardLocator(page);
 
-  const bodyText = await getBodyText(page);
+  for (let i = 0; i < 8; i++) {
+    await waitUntilPageUsable(page, `wait_search_cards_${i + 1}`);
 
-  if (!skuKeywords.test(bodyText)) {
-    return {
-      selected: false,
-      reason: "NO_SKU_REQUIRED"
-    };
+    const count = await cardLocator.count().catch(() => 0);
+
+    if (count > 0) {
+      console.log(`检测到搜索结果商品卡片数量：${count}`);
+      return count;
+    }
+
+    console.log(`暂未检测到商品卡片，滚动加载，第 ${i + 1} 次。`);
+    await page.mouse.wheel(0, 900);
+    await page.waitForTimeout(2000);
   }
 
-  const candidates = page.locator(
-    'button:not([disabled]), [role="button"], li:not([disabled]), span:not([disabled]), div:not([disabled])'
+  return 0;
+}
+
+async function getCardBrief(card, index) {
+  const text = normalizeText(await card.innerText({ timeout: 3000 }).catch(() => ""));
+  const href = await card.getAttribute("href").catch(() => "");
+  const id = await card.getAttribute("id").catch(() => "");
+
+  let title = normalizeText(
+    await card
+      .locator('[class*="Title--title"]')
+      .first()
+      .innerText({ timeout: 1200 })
+      .catch(() => "")
   );
 
-  const count = await candidates.count().catch(() => 0);
+  if (!title) {
+    title = normalizeText(
+      await card
+        .locator('[class*="Title--descWrapper"]')
+        .first()
+        .innerText({ timeout: 1200 })
+        .catch(() => "")
+    );
+  }
 
-  for (let i = 0; i < Math.min(count, 120); i++) {
-    const item = candidates.nth(i);
+  if (!title) {
+    title = text.slice(0, 160);
+  }
 
-    try {
-      const visible = await item.isVisible();
-      if (!visible) continue;
+  let price = "";
+  const priceText = normalizeText(
+    await card
+      .locator('[class*="Price--priceWrapper"]')
+      .first()
+      .innerText({ timeout: 1200 })
+      .catch(() => "")
+  );
 
-      const text = normalizeText(await item.innerText({ timeout: 1000 }).catch(() => ""));
+  const priceMatch = (priceText || text).match(/[¥￥]\s*\d+(?:\.\d+)?/);
+  if (priceMatch) price = priceMatch[0];
 
-      if (!text) continue;
-      if (/加入购物车|立即购买|购买|付款|结算|客服|收藏|分享|店铺|首页/.test(text)) {
-        continue;
-      }
+  const sales = normalizeText(
+    await card
+      .locator('[class*="Price--realSales"]')
+      .first()
+      .innerText({ timeout: 1200 })
+      .catch(() => "")
+  );
 
-      if (/缺货|无货|售罄|不可选|已选/.test(text)) {
-        continue;
-      }
+  const shop = normalizeText(
+    await card
+      .locator('[class*="ShopInfo--shopNameText"]')
+      .first()
+      .innerText({ timeout: 1200 })
+      .catch(() => "")
+  );
 
-      const box = await item.boundingBox();
-      if (!box || box.width < 10 || box.height < 10) continue;
+  return {
+    index,
+    id,
+    title,
+    price,
+    sales,
+    shop,
+    href,
+    card_text: text.slice(0, 600)
+  };
+}
 
-      await item.click({ timeout: 3000 }).catch(() => {});
-      await page.waitForTimeout(500);
+/**
+ * 核心替换部分：
+ * 不再 goto click.simba，也不再拼 item.taobao.com。
+ * 直接点击搜索结果卡片，等待淘宝自己打开真实商品详情页。
+ */
+async function openDetailByClick(searchPage, card, index) {
+  await waitUntilPageUsable(searchPage, `before_click_card_${index}`);
 
-      return {
-        selected: true,
-        text
-      };
-    } catch {
-      // 继续尝试下一个
+  await card.scrollIntoViewIfNeeded().catch(() => {});
+  await searchPage.waitForTimeout(1000);
+
+  const context = searchPage.context();
+  const beforePages = new Set(context.pages());
+
+  const popupPromise = searchPage
+    .waitForEvent("popup", { timeout: 15000 })
+    .catch(() => null);
+
+  console.log(`点击综合排序第 ${index} 个商品卡片，等待详情页打开。`);
+
+  await card.click({
+    timeout: 15000
+  });
+
+  let detailPage = await popupPromise;
+
+  if (!detailPage) {
+    const afterPages = context.pages();
+    const newPage = afterPages.find((p) => !beforePages.has(p));
+
+    if (newPage) {
+      detailPage = newPage;
     }
   }
 
-  return {
-    selected: false,
-    reason: "SKU_MAY_BE_REQUIRED_BUT_NOT_SELECTED"
-  };
+  /**
+   * 如果没有新标签页，说明淘宝可能在当前页跳转。
+   */
+  if (!detailPage) {
+    detailPage = searchPage;
+  }
+
+  await detailPage.waitForLoadState("domcontentloaded", { timeout: 60000 }).catch(() => {});
+  await detailPage.waitForTimeout(5000);
+  await waitUntilPageUsable(detailPage, `detail_${index}`);
+
+  console.log(`详情页当前 URL：${detailPage.url()}`);
+
+  return detailPage;
 }
+
+function isWrongMyTaobaoPage(text, url) {
+  const t = normalizeText(text);
+  const u = String(url || "");
+
+  const looksLikeMyTaobao =
+    /我的订单|已买到的宝贝|收货地址|账户设置|我的购物车有降价|我的卡券包|退款维权|评价管理/.test(
+      t
+    ) || /i\.taobao\.com|buyertrade\.taobao\.com/.test(u);
+
+  const looksLikeProduct =
+    /加入购物车|立即购买|商品详情|宝贝详情|价格|月销|已售|人付款|评价/.test(t);
+
+  return looksLikeMyTaobao && !looksLikeProduct;
+}
+
+async function extractProductTitle(page) {
+  const selectors = [
+    "h1",
+    '[class*="ItemHeader"]',
+    '[class*="title"]',
+    '[class*="Title"]',
+    '[class*="tb-main-title"]'
+  ];
+
+  for (const selector of selectors) {
+    const text = normalizeText(
+      await page.locator(selector).first().innerText({ timeout: 1500 }).catch(() => "")
+    );
+
+    if (text && text.length >= 3) return text.slice(0, 200);
+  }
+
+  const bodyText = await getBodyText(page);
+  return bodyText.slice(0, 160);
+}
+
+async function parseGoodRateFromDetail(page) {
+  await waitUntilPageUsable(page, "parse_good_rate_initial");
+
+  let text = await getBodyText(page);
+  let rate = parseGoodRate(text);
+
+  if (rate !== null) return rate;
+
+  /**
+   * 滚动详情页，等待评价区域懒加载。
+   */
+  for (let i = 0; i < 5; i++) {
+    await page.mouse.wheel(0, 1000);
+    await page.waitForTimeout(2000);
+    await waitUntilPageUsable(page, `parse_good_rate_scroll_${i + 1}`);
+
+    text = await getBodyText(page);
+    rate = parseGoodRate(text);
+
+    if (rate !== null) return rate;
+  }
+
+  /**
+   * 尝试点击评价相关 Tab。
+   */
+  const reviewLocators = [
+    page.getByText("宝贝评价", { exact: false }).first(),
+    page.getByText("累计评价", { exact: false }).first(),
+    page.getByText("评价", { exact: false }).first()
+  ];
+
+  for (const loc of reviewLocators) {
+    const visible = await loc.isVisible().catch(() => false);
+
+    if (!visible) continue;
+
+    await loc.click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+    await waitUntilPageUsable(page, "after_click_review_tab");
+
+    text = await getBodyText(page);
+    rate = parseGoodRate(text);
+
+    if (rate !== null) return rate;
+  }
+
+  return null;
+}
+
 async function findAddCartButton(page) {
   const candidateLocators = [
-    // 最推荐：直接找 button 中包含“加入购物车”
-    page.locator('button').filter({ hasText: /加入购物车/ }),
-
-    // 兼容淘宝这种 button > span 的结构
+    page.locator("button").filter({ hasText: /加入购物车/ }),
     page.locator('xpath=//button[.//span[contains(normalize-space(.), "加入购物车")]]'),
-
-    // 兼容 class 里带 primaryBtn / leftBtn 的按钮
     page.locator('button[class*="primaryBtn"]').filter({ hasText: /加入购物车/ }),
     page.locator('button[class*="leftBtn"]').filter({ hasText: /加入购物车/ }),
     page.locator('button[class*="btn"]').filter({ hasText: /加入购物车/ }),
-
-    // 兜底：通过 role 找按钮
-    page.getByRole('button', { name: /加入购物车/ })
+    page.getByRole("button", { name: /加入购物车/ })
   ];
 
   for (const locator of candidateLocators) {
@@ -772,10 +507,10 @@ async function findAddCartButton(page) {
       const enabled = await btn.isEnabled().catch(() => false);
       if (!enabled) continue;
 
-      const text = await btn.innerText().catch(() => "");
+      const text = normalizeText(await btn.innerText().catch(() => ""));
 
-      // 安全检查：必须是加入购物车，不能是购买、结算、付款
       if (!/加入购物车/.test(text)) continue;
+
       if (/立即购买|马上抢|提交订单|去结算|结算|付款|确认支付|购买|下单/.test(text)) {
         continue;
       }
@@ -786,92 +521,200 @@ async function findAddCartButton(page) {
 
   return null;
 }
-async function addProductToCart(context, product, index) {
-  const detail = await context.newPage();
 
-  try {
-  const targetUrl = buildCanonicalItemUrl(product.product_id, product.url);
+async function chooseSkuIfNeeded(page) {
+  const candidates = page.locator(
+    [
+      '[class*="Sku"] button:not([disabled])',
+      '[class*="sku"] button:not([disabled])',
+      '[class*="Sku"] li:not([disabled])',
+      '[class*="sku"] li:not([disabled])',
+      'button:not([disabled])',
+      'li:not([disabled])',
+      'span:not([disabled])'
+    ].join(",")
+  );
 
-        console.log(`准备加购商品，打开详情页：${targetUrl}`);
+  const count = await candidates.count().catch(() => 0);
 
-        await detail.goto(targetUrl, {
-        waitUntil: "domcontentloaded",
-            timeout: 60000
-});
+  for (let i = 0; i < Math.min(count, 120); i++) {
+    const el = candidates.nth(i);
 
-    await detail.waitForTimeout(4000);
+    const visible = await el.isVisible().catch(() => false);
+    if (!visible) continue;
 
-    await waitUntilPageUsable(detail, `cart_${index}`);
+    const text = normalizeText(await el.innerText({ timeout: 1000 }).catch(() => ""));
 
-    const beforeText = await getBodyText(detail);
-    const currentUrl = detail.url();
+    if (!text) continue;
 
-if (
-  /我的淘宝|我的订单|已买到的宝贝|收货地址|账户设置|我的购物车有降价/.test(beforeText) &&
-  !/加入购物车|立即购买|商品|价格|月销|已售|人付款/.test(beforeText)
-) {
-  product.cart_status = "WRONG_PAGE_NOT_PRODUCT_DETAIL";
-  product.error = "当前页面是我的淘宝/账户页，不是商品详情页，因此无法查找加入购物车按钮";
-  product.current_url = currentUrl;
-  product.target_url = targetUrl;
-  product.screenshot = await screenshot(detail, `cart_${index}_wrong_page`);
-  product.debug_text = beforeText.slice(0, 800);
-  return product;
-}
-
-    const skuResult = await chooseSkuIfPossible(detail);
-    product.sku_selection = skuResult;
-
-    await detail.waitForTimeout(1000);
-
-// 等待页面上的按钮区域加载出来
-await detail.waitForSelector("button, span", {
-  timeout: 20000
-}).catch(() => {});
-
-const addCartButton = await findAddCartButton(detail);
-
-if (!addCartButton) {
-  product.cart_status = "ADD_CART_BUTTON_NOT_FOUND";
-  product.screenshot = await screenshot(detail, `cart_${index}_button_not_found`);
-
-  const pageText = await getBodyText(detail);
-
-  product.error = "页面上未找到可点击的“加入购物车”button";
-  product.debug_text = pageText.slice(0, 800);
-
-  return product;
-}
-
-await addCartButton.scrollIntoViewIfNeeded().catch(() => {});
-await detail.waitForTimeout(500);
-
-await addCartButton.click({
-  timeout: 15000
-});
-
-    await detail.waitForTimeout(3000);
-
-    await waitUntilPageUsable(detail, `after_add_cart_${index}`);
-
-    const afterText = await getBodyText(detail);
-
-    if (/成功加入购物车|已加入购物车|加入成功|商品已成功加入购物车|添加成功/.test(afterText)) {
-      product.cart_status = "SUCCESS";
-    } else if (/请选择|选择规格|请选择规格|颜色|尺码|套餐|型号|版本/.test(afterText)) {
-      product.cart_status = "SKU_REQUIRED";
-    } else if (/库存不足|缺货|售罄|已下架/.test(afterText)) {
-      product.cart_status = "OUT_OF_STOCK";
-    } else {
-      product.cart_status = "ADD_CART_RESULT_UNKNOWN";
+    if (/加入购物车|立即购买|购买|付款|结算|客服|收藏|分享|店铺|首页|搜索/.test(text)) {
+      continue;
     }
 
-    product.screenshot = await screenshot(detail, `cart_${index}_result`);
+    if (/缺货|无货|售罄|不可选|已选/.test(text)) {
+      continue;
+    }
 
-    return product;
-  } finally {
-    await detail.close().catch(() => {});
+    const box = await el.boundingBox().catch(() => null);
+    if (!box || box.width < 10 || box.height < 10) continue;
+
+    console.log(`尝试选择规格：${text}`);
+
+    await el.click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(800);
+
+    return {
+      selected: true,
+      text
+    };
   }
+
+  return {
+    selected: false,
+    reason: "未找到可安全点击的规格项"
+  };
+}
+
+async function addToCart(detailPage, productInfo, index) {
+  await waitUntilPageUsable(detailPage, `before_add_cart_${index}`);
+
+  const beforeText = await getBodyText(detailPage);
+  const beforeUrl = detailPage.url();
+
+  if (isWrongMyTaobaoPage(beforeText, beforeUrl)) {
+    return {
+      success: false,
+      status: "WRONG_PAGE_NOT_PRODUCT_DETAIL",
+      error: "当前页面是我的淘宝/账户页，不是商品详情页",
+      current_url: beforeUrl,
+      debug_text: beforeText.slice(0, 1000),
+      screenshot: await screenshot(detailPage, `cart_${index}_wrong_page`)
+    };
+  }
+
+  if (/已下架|商品不存在|卖光了|暂时缺货|库存不足|此商品已不能购买/.test(beforeText)) {
+    return {
+      success: false,
+      status: "OUT_OF_STOCK",
+      error: "商品下架、缺货或不可购买",
+      current_url: beforeUrl,
+      screenshot: await screenshot(detailPage, `cart_${index}_out_of_stock`)
+    };
+  }
+
+  await detailPage.waitForSelector("button, span", {
+    timeout: 20000
+  }).catch(() => {});
+
+  let btn = await findAddCartButton(detailPage);
+
+  if (!btn) {
+    await detailPage.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await detailPage.waitForTimeout(1000);
+    btn = await findAddCartButton(detailPage);
+  }
+
+  if (!btn) {
+    await detailPage.mouse.wheel(0, -1200).catch(() => {});
+    await detailPage.waitForTimeout(1000);
+    btn = await findAddCartButton(detailPage);
+  }
+
+  if (!btn) {
+    const text = await getBodyText(detailPage);
+
+    return {
+      success: false,
+      status: "ADD_CART_BUTTON_NOT_FOUND",
+      error: "商品详情页未找到可点击的“加入购物车”按钮",
+      current_url: detailPage.url(),
+      debug_text: text.slice(0, 1000),
+      screenshot: await screenshot(detailPage, `cart_${index}_button_not_found`)
+    };
+  }
+
+  await btn.scrollIntoViewIfNeeded().catch(() => {});
+  await detailPage.waitForTimeout(500);
+
+  console.log("点击加入购物车。");
+
+  await btn.click({ timeout: 15000 });
+  await detailPage.waitForTimeout(3000);
+  await waitUntilPageUsable(detailPage, `after_first_add_cart_${index}`);
+
+  let afterText = await getBodyText(detailPage);
+
+  if (/成功加入购物车|已加入购物车|加入成功|商品已成功加入购物车|添加成功/.test(afterText)) {
+    return {
+      success: true,
+      status: "SUCCESS",
+      message: "加入购物车成功",
+      current_url: detailPage.url(),
+      screenshot: await screenshot(detailPage, `cart_${index}_success`)
+    };
+  }
+
+  if (/请选择|选择规格|请选择规格|颜色|尺码|套餐|型号|版本/.test(afterText)) {
+    console.log("检测到需要选择规格，尝试选择第一个可用规格。");
+
+    const skuResult = await chooseSkuIfNeeded(detailPage);
+
+    await detailPage.waitForTimeout(1000);
+    btn = await findAddCartButton(detailPage);
+
+    if (!btn) {
+      return {
+        success: false,
+        status: "SKU_REQUIRED",
+        error: "需要选择规格，但选择规格后仍未找到加入购物车按钮",
+        sku_selection: skuResult,
+        current_url: detailPage.url(),
+        debug_text: afterText.slice(0, 1000),
+        screenshot: await screenshot(detailPage, `cart_${index}_sku_no_button`)
+      };
+    }
+
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
+    await detailPage.waitForTimeout(500);
+
+    console.log("选择规格后再次点击加入购物车。");
+
+    await btn.click({ timeout: 15000 });
+    await detailPage.waitForTimeout(3000);
+    await waitUntilPageUsable(detailPage, `after_second_add_cart_${index}`);
+
+    afterText = await getBodyText(detailPage);
+
+    if (/成功加入购物车|已加入购物车|加入成功|商品已成功加入购物车|添加成功/.test(afterText)) {
+      return {
+        success: true,
+        status: "SUCCESS",
+        message: "选择规格后加入购物车成功",
+        sku_selection: skuResult,
+        current_url: detailPage.url(),
+        screenshot: await screenshot(detailPage, `cart_${index}_success_after_sku`)
+      };
+    }
+
+    return {
+      success: false,
+      status: "ADD_CART_RESULT_UNKNOWN",
+      error: "选择规格并点击加入购物车后，未检测到成功提示",
+      sku_selection: skuResult,
+      current_url: detailPage.url(),
+      debug_text: afterText.slice(0, 1000),
+      screenshot: await screenshot(detailPage, `cart_${index}_unknown_after_sku`)
+    };
+  }
+
+  return {
+    success: false,
+    status: "ADD_CART_RESULT_UNKNOWN",
+    error: "点击加入购物车后未检测到成功提示，也未检测到规格提示",
+    current_url: detailPage.url(),
+    debug_text: afterText.slice(0, 1000),
+    screenshot: await screenshot(detailPage, `cart_${index}_unknown`)
+  };
 }
 
 async function main() {
@@ -891,36 +734,27 @@ async function main() {
     return;
   }
 
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    channel: "chrome",
-    viewport: {
-      width: 1400,
-      height: 900
-    },
-    args: [
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-blink-features=AutomationControlled"
-    ]
-  });
-
+  const context = await launchContext();
   const page = context.pages()[0] || await context.newPage();
 
   try {
     await closeExtraPages(context, page);
 
     await openTaobaoHome(page);
+    await openSearchPage(page);
 
-    await searchKeyword(page, keyword);
+    const cardCount = await waitSearchCards(page);
 
-    const { links, searchShot, keywordCore } = await collectProductLinks(page, keyword);
+    if (cardCount <= 0) {
+      const shot = await screenshot(page, "search_no_cards");
+      const text = await getBodyText(page);
 
-    if (!links.length) {
       printJson("NO_RESULT", {
         error_code: "NO_RESULT",
-        message: "没有读取到淘宝商品结果",
-        screenshot: searchShot
+        message: "搜索页未检测到商品卡片",
+        current_url: page.url(),
+        screenshot: shot,
+        debug_text: text.slice(0, 1500)
       });
 
       await context.close();
@@ -929,114 +763,202 @@ async function main() {
 
     const scanned = [];
     const matched = [];
-    let rateFoundCount = 0;
+    const maxLoop = Math.min(maxScan, cardCount);
 
-    for (let i = 0; i < Math.min(maxScan, links.length); i++) {
-      const item = links[i];
+    for (let i = 0; i < maxLoop; i++) {
+      /**
+       * 每次循环重新获取 locator，避免 DOM 刷新后旧 locator 失效。
+       */
+      const cardLocator = getSearchCardLocator(page);
+      const currentCount = await cardLocator.count().catch(() => 0);
 
-      console.log(`\n正在检查第 ${i + 1} 个商品：${item.title.slice(0, 60)}...`);
+      if (i >= currentCount) {
+        console.log(`第 ${i + 1} 个商品不存在，结束扫描。`);
+        break;
+      }
+
+      const card = cardLocator.nth(i);
+      const brief = await getCardBrief(card, i + 1);
+
+      console.log("\n----------------------------------------------------");
+      console.log(`开始检查综合排序第 ${i + 1} 个商品`);
+      console.log(`标题：${brief.title}`);
+      console.log(`价格：${brief.price}`);
+      console.log(`销量：${brief.sales}`);
+      console.log(`店铺：${brief.shop}`);
+      console.log("----------------------------------------------------");
+
+      let detailPage = null;
+      let openedInSearchPage = false;
 
       try {
-        const detail = await parseProductDetail(context, item, i + 1, keyword, keywordCore);
-        if (detail.page_mismatch) {
-            console.log(`跳过异常页面：${detail.mismatch_reason}`);
-            continue;
-        }
-        scanned.push(detail);
-        if (detail.keyword_mismatch) {
-            console.log(`跳过不相关商品：${detail.title}`);
-            continue;
-        }
-        if (detail.rate_found) {
-          rateFoundCount++;
+        detailPage = await openDetailByClick(page, card, i + 1);
+        openedInSearchPage = detailPage === page;
+
+        const detailText = await getBodyText(detailPage);
+        const detailUrl = detailPage.url();
+
+        if (isWrongMyTaobaoPage(detailText, detailUrl)) {
+          const wrongInfo = {
+            ...brief,
+            detail_url: detailUrl,
+            status: "WRONG_PAGE_NOT_PRODUCT_DETAIL",
+            message: "点击商品后进入了我的淘宝/账户页，不是商品详情页"
+          };
+
+          scanned.push(wrongInfo);
+          console.log("跳过：进入了我的淘宝/账户页。");
+
+          if (!openedInSearchPage) {
+            await detailPage.close().catch(() => {});
+          }
+
+          if (openedInSearchPage) {
+            await openSearchPage(page);
+            await waitSearchCards(page);
+          }
+
+          continue;
         }
 
-        if (detail.good_rate !== null && detail.good_rate > minGoodRate) {
-         matched.push({
-            title: detail.title,
-            price: detail.price,
-            shop: detail.shop,
-            url: buildCanonicalItemUrl(detail.product_id, detail.url),
-            source_url: detail.source_url,
-            product_id: detail.product_id,
-            good_rate: detail.good_rate,
-            cart_status: "PENDING"
-        });
+        const productTitle = await extractProductTitle(detailPage);
+        const goodRate = await parseGoodRateFromDetail(detailPage);
 
-          console.log(`命中商品：好评率 ${detail.good_rate}% > ${minGoodRate}%`);
-        } else if (detail.good_rate !== null) {
-          console.log(`未命中：好评率 ${detail.good_rate}% 不大于 ${minGoodRate}%`);
-        } else {
+        const productInfo = {
+          ...brief,
+          product_title: productTitle,
+          detail_url: detailUrl,
+          good_rate: goodRate,
+          rate_found: goodRate !== null
+        };
+
+        scanned.push(productInfo);
+
+        console.log(`详情页标题：${productTitle}`);
+        console.log(`详情页 URL：${detailUrl}`);
+        console.log(`解析到好评率：${goodRate === null ? "未找到" : goodRate + "%"}`);
+
+        if (goodRate === null) {
           console.log("未找到明确好评率，继续检查下一个商品。");
+
+          if (!openedInSearchPage) {
+            await detailPage.close().catch(() => {});
+          } else {
+            await openSearchPage(page);
+            await waitSearchCards(page);
+          }
+
+          continue;
         }
 
-        if (matched.length >= targetCount) {
-          break;
+        if (goodRate <= minGoodRate) {
+          console.log(`好评率 ${goodRate}% 不大于阈值 ${minGoodRate}%，继续检查下一个商品。`);
+
+          if (!openedInSearchPage) {
+            await detailPage.close().catch(() => {});
+          } else {
+            await openSearchPage(page);
+            await waitSearchCards(page);
+          }
+
+          continue;
+        }
+
+        console.log(`命中商品：好评率 ${goodRate}% > ${minGoodRate}%，准备加入购物车。`);
+
+        const cartResult = await addToCart(detailPage, productInfo, i + 1);
+
+        const resultProduct = {
+          ...productInfo,
+          cart_success: cartResult.success,
+          cart_result: cartResult.status,
+          cart_detail: cartResult
+        };
+
+        matched.push(resultProduct);
+
+        if (!openedInSearchPage) {
+          await detailPage.close().catch(() => {});
+        }
+
+        const successCount = matched.filter((p) => p.cart_success).length;
+
+        if (successCount >= targetCount) {
+          printJson("SUCCESS", {
+            matched_count: matched.length,
+            cart_success_count: successCount,
+            products: matched,
+            scanned_count: scanned.length,
+            scanned_products: scanned
+          });
+
+          await context.close();
+          return;
+        }
+
+        console.log(`当前商品加购结果：${cartResult.status}，继续检查下一个商品。`);
+
+        if (openedInSearchPage) {
+          await openSearchPage(page);
+          await waitSearchCards(page);
         }
       } catch (err) {
-        scanned.push({
-          title: item.title,
-          url: item.url,
-          error: String(err.message || err).slice(0, 300)
-        });
+        const errorInfo = {
+          ...brief,
+          status: "DETAIL_OR_CART_ERROR",
+          error: String(err.message || err).slice(0, 500)
+        };
 
-        console.log(`该商品检查失败，继续下一个：${String(err.message || err).slice(0, 120)}`);
+        scanned.push(errorInfo);
+
+        console.log(`第 ${i + 1} 个商品处理异常：${errorInfo.error}`);
+
+        if (detailPage && detailPage !== page) {
+          await detailPage.close().catch(() => {});
+        }
+
+        if (page.isClosed()) {
+          break;
+        }
+
+        if (!/s\.taobao\.com\/search/.test(page.url())) {
+          await openSearchPage(page);
+          await waitSearchCards(page);
+        }
       }
     }
 
-    if (!matched.length) {
-      const status = rateFoundCount === 0 ? "RATE_NOT_FOUND" : "NO_MATCHED_PRODUCT";
+    const rateFoundCount = scanned.filter((p) => p.rate_found).length;
+    const matchedCount = matched.length;
+    const successCount = matched.filter((p) => p.cart_success).length;
 
-      printJson(status, {
-        error_code: status,
-        message:
-          rateFoundCount === 0
-            ? `扫描前 ${Math.min(maxScan, links.length)} 个商品后，没有找到明确的好评率字段。淘宝页面可能未展示好评率。`
-            : `扫描前 ${Math.min(maxScan, links.length)} 个商品后，没有找到好评率大于 ${minGoodRate}% 的商品。`,
-        scanned_count: Math.min(maxScan, links.length),
-        rate_found_count: rateFoundCount,
-        scanned_products: scanned.slice(0, 10),
-        screenshot: searchShot
-      });
+    let status = "NO_MATCHED_PRODUCT";
 
-      await context.close();
-      return;
+    if (successCount > 0) {
+      status = "PARTIAL_SUCCESS";
+    } else if (rateFoundCount === 0) {
+      status = "RATE_NOT_FOUND";
+    } else if (matchedCount > 0) {
+      status = "ADD_CART_FAILED";
     }
 
-    const cartResults = [];
-
-    for (let i = 0; i < matched.length; i++) {
-  if (!isKeywordRelatedText(matched[i].title, keyword, keywordCore)) {
-    console.log(`跳过标题不相关的命中商品：${matched[i].title}`);
-    continue;
-  }
-
-  console.log(`\n正在加入购物车：${matched[i].title.slice(0, 60)}...`);
-
-  const result = await addProductToCart(context, matched[i], i + 1);
-  cartResults.push(result);
-}
-
-    const successCount = cartResults.filter((p) => p.cart_status === "SUCCESS").length;
-
-    const finalStatus =
-      successCount === cartResults.length
-        ? "SUCCESS"
-        : successCount > 0
-          ? "PARTIAL_SUCCESS"
-          : "ADD_CART_FAILED";
-
-    printJson(finalStatus, {
-      matched_count: matched.length,
-      cart_success_count: successCount,
-      products: cartResults,
+    printJson(status, {
+      error_code: status,
+      message:
+        status === "RATE_NOT_FOUND"
+          ? `从综合排序第 1 个商品开始检查，共检查 ${scanned.length} 个商品，未找到明确好评率字段。`
+          : `从综合排序第 1 个商品开始检查，共检查 ${scanned.length} 个商品，未找到满足条件并成功加入购物车的商品。`,
       scanned_count: scanned.length,
-      screenshot: searchShot
+      rate_found_count: rateFoundCount,
+      matched_count: matchedCount,
+      cart_success_count: successCount,
+      products: matched,
+      scanned_products: scanned
     });
 
     await context.close();
   } catch (err) {
-    const shot = await screenshot(page, "browser_error");
+    const shot = page && !page.isClosed() ? await screenshot(page, "browser_error") : null;
 
     printJson("BROWSER_ERROR", {
       error_code: "BROWSER_ERROR",
