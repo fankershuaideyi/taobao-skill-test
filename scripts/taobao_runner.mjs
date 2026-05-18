@@ -48,6 +48,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildCanonicalItemUrl(productId, fallbackUrl = "") {
+  const id = String(productId || "").trim();
+
+  if (/^\d{8,}$/.test(id)) {
+    return `https://item.taobao.com/item.htm?id=${id}`;
+  }
+
+  return fallbackUrl;
+}
+
 function normalizeText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
@@ -515,17 +525,20 @@ async function collectProductLinks(page, keyword) {
 
       seen.add(productId);
 
-      links.push({
-        title: title.slice(0, 180),
-        url: href,
-        product_id: productId,
-        price,
-        sales,
-        shop,
-        abstract: abstractText,
-        card_text: cardText.slice(0, 800),
-        score
-      });
+  const canonicalUrl = buildCanonicalItemUrl(productId, href);
+
+links.push({
+  title: title.slice(0, 180),
+  url: canonicalUrl,
+  source_url: href,
+  product_id: productId,
+  price,
+  sales,
+  shop,
+  abstract: abstractText,
+  card_text: cardText.slice(0, 800),
+  score
+});
     } catch (err) {
       console.log("解析单个商品卡片失败：", String(err.message || err).slice(0, 200));
     }
@@ -586,9 +599,13 @@ async function parseProductDetail(context, item, index, keyword, keywordCore) {
   const detail = await context.newPage();
 
   try {
-    await detail.goto(item.url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
+    const targetUrl = buildCanonicalItemUrl(item.product_id, item.url);
+
+    console.log(`打开商品详情页：${targetUrl}`);
+
+    await detail.goto(targetUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000
     });
 
     await detail.waitForTimeout(4000);
@@ -773,22 +790,34 @@ async function addProductToCart(context, product, index) {
   const detail = await context.newPage();
 
   try {
-    await detail.goto(product.url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
+  const targetUrl = buildCanonicalItemUrl(product.product_id, product.url);
+
+        console.log(`准备加购商品，打开详情页：${targetUrl}`);
+
+        await detail.goto(targetUrl, {
+        waitUntil: "domcontentloaded",
+            timeout: 60000
+});
 
     await detail.waitForTimeout(4000);
 
     await waitUntilPageUsable(detail, `cart_${index}`);
 
     const beforeText = await getBodyText(detail);
+    const currentUrl = detail.url();
 
-    if (/已下架|商品不存在|卖光了|暂时缺货|库存不足|此商品已不能购买/.test(beforeText)) {
-      product.cart_status = "OUT_OF_STOCK";
-      product.screenshot = await screenshot(detail, `cart_${index}_out_of_stock`);
-      return product;
-    }
+if (
+  /我的淘宝|我的订单|已买到的宝贝|收货地址|账户设置|我的购物车有降价/.test(beforeText) &&
+  !/加入购物车|立即购买|商品|价格|月销|已售|人付款/.test(beforeText)
+) {
+  product.cart_status = "WRONG_PAGE_NOT_PRODUCT_DETAIL";
+  product.error = "当前页面是我的淘宝/账户页，不是商品详情页，因此无法查找加入购物车按钮";
+  product.current_url = currentUrl;
+  product.target_url = targetUrl;
+  product.screenshot = await screenshot(detail, `cart_${index}_wrong_page`);
+  product.debug_text = beforeText.slice(0, 800);
+  return product;
+}
 
     const skuResult = await chooseSkuIfPossible(detail);
     product.sku_selection = skuResult;
@@ -909,7 +938,10 @@ async function main() {
 
       try {
         const detail = await parseProductDetail(context, item, i + 1, keyword, keywordCore);
-
+        if (detail.page_mismatch) {
+            console.log(`跳过异常页面：${detail.mismatch_reason}`);
+            continue;
+        }
         scanned.push(detail);
         if (detail.keyword_mismatch) {
             console.log(`跳过不相关商品：${detail.title}`);
@@ -920,14 +952,16 @@ async function main() {
         }
 
         if (detail.good_rate !== null && detail.good_rate > minGoodRate) {
-          matched.push({
+         matched.push({
             title: detail.title,
             price: detail.price,
             shop: detail.shop,
-            url: detail.url,
+            url: buildCanonicalItemUrl(detail.product_id, detail.url),
+            source_url: detail.source_url,
+            product_id: detail.product_id,
             good_rate: detail.good_rate,
             cart_status: "PENDING"
-          });
+        });
 
           console.log(`命中商品：好评率 ${detail.good_rate}% > ${minGoodRate}%`);
         } else if (detail.good_rate !== null) {
